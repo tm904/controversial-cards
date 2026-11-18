@@ -16,12 +16,48 @@ Create a room, share the 4-letter code (or the invite link), and start once at l
 
 ### Docker
 
-Pull the pre-built multi-arch image (`linux/amd64`, `linux/arm64`) from GitHub Container Registry or build locally:
+Pull the pre-built multi-arch image (`linux/amd64`, `linux/arm64`) from GitHub Container Registry or build it locally from [`Dockerfile`](Dockerfile).
+
+#### Run via Docker Compose (recommended for NAS / servers)
+
+Add this service to your `docker-compose.yml` (if you run behind a reverse proxy or Cloudflare Tunnel on the same Compose network, you can omit `ports` and point your proxy to `http://controversial-cards:3000`; otherwise uncomment `ports` to access `http://<host>:3000` directly):
+
+```yaml
+services:
+  controversial-cards:
+    image: ghcr.io/tm904/controversial-cards:latest
+    container_name: controversial-cards
+    restart: unless-stopped
+    cpus: 1.0
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      - TZ=Europe/Berlin
+    # ports:
+    #   - "3000:3000"
+```
+
+No volume is needed because game rooms live in memory. The image includes a `/api/health` healthcheck, runs as a non-root user (`nextjs`), and sets `NODE_OPTIONS=--max-old-space-size=384` by default.
+
+To update to the latest image:
 
 ```bash
-docker compose pull && docker compose up -d
-# or build locally:
+docker compose pull controversial-cards && docker compose up -d controversial-cards
+```
+
+#### Build locally
+
+```bash
 docker compose up -d --build
+# or without Compose:
+docker build -t controversial-cards .
+docker run -d --name controversial-cards -p 3000:3000 controversial-cards
 ```
 
 ## How a game works
