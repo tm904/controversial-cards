@@ -14,6 +14,16 @@ npm test        # engine unit tests
 
 Create a room, share the 4-letter code (or the invite link), and start once at least 2 players are in.
 
+### Docker
+
+Pull the pre-built multi-arch image (`linux/amd64`, `linux/arm64`) from GitHub Container Registry or build locally:
+
+```bash
+docker compose pull && docker compose up -d
+# or build locally:
+docker compose up -d --build
+```
+
 ## How a game works
 
 1. The host picks the card sets (built-in and/or imported), who picks the winner (see below) and the points needed to win, then starts the game. Everyone is dealt 10 answer cards.
