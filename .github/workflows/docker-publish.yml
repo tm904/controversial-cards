@@ -6,16 +6,82 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Daily rebuild at 02:13 UTC to pick up Debian/Node security patches
+    # Daily check at 02:13 UTC; only rebuilds when base image or Debian packages changed
     - cron: "13 2 * * *"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
   packages: write
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.decide.outputs.should_build }}
+      base_digest: ${{ steps.decide.outputs.base_digest }}
+    steps:
+      - name: Checkout Dockerfile
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: Dockerfile
+
+      - name: Log in to GitHub Container Registry (ghcr.io)
+        if: github.event_name == 'schedule'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for base image or OS package updates
+        id: decide
+        run: |
+          set -euo pipefail
+          BASE_IMAGE=$(awk '/^FROM / {img=$2} END {print img}' Dockerfile)
+          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]'):latest"
+
+          docker buildx imagetools inspect --raw "$BASE_IMAGE" > /tmp/base-manifest.raw
+          BASE_DIGEST="sha256:$(sha256sum /tmp/base-manifest.raw | awk '{print $1}')"
+          echo "base_digest=$BASE_DIGEST" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "Event '${{ github.event_name }}': running build."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! docker pull -q "$IMAGE"; then
+            echo "No published image found yet: running build."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          SAVED_DIGEST=$(docker inspect --format '{{ index .Config.Labels "io.tm904.base-digest" }}' "$IMAGE" 2>/dev/null || true)
+          if [ "$SAVED_DIGEST" != "$BASE_DIGEST" ]; then
+            echo "Base image '$BASE_IMAGE' changed ($SAVED_DIGEST -> $BASE_DIGEST): rebuilding."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          docker run --rm --user root --entrypoint sh "$IMAGE" -c 'apt-get update -qq && apt-get -s upgrade' > /tmp/apt-sim.txt
+          if grep -q '^Inst ' /tmp/apt-sim.txt; then
+            echo "Pending Debian package updates detected:"
+            grep '^Inst ' /tmp/apt-sim.txt
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Base image and OS packages are up to date; skipping rebuild."
+          echo "should_build=false" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -37,7 +103,8 @@ jobs:
         run: npm run lint
 
   docker:
-    needs: test
+    needs: [check, test]
+    if: needs.check.outputs.should_build == 'true' && needs.test.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -105,7 +172,9 @@ jobs:
           provenance: false
           sbom: false
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            io.tm904.base-digest=${{ needs.check.outputs.base_digest }}
           cache-from: |
             type=gha,scope=multiarch
             type=gha,scope=amd64
